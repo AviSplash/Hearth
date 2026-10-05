@@ -322,6 +322,7 @@ function Devices() {
   const secure = window.isSecureContext;
   const primary = info.urls[0];
   const caUrl = info.https ? `${location.protocol}//${location.host}${info.https.caPath}` : null;
+  const hasName = info.urls.some((u) => u.label?.startsWith('By name'));
 
   const steps = {
     android: [
@@ -340,7 +341,16 @@ function Devices() {
       'Download the certificate and double-click it → Install Certificate.',
       'Pick “Local Machine” (or Current User) → “Place all certificates in the following store” → Trusted Root Certification Authorities → Finish.',
       `Open ${primary?.https || 'the https:// address'} in Edge or Chrome and click the install icon in the address bar (or ⋯ → Apps → Install).`,
-      'On the computer running Hearth itself you can skip the certificate: http://localhost:' + (location.port || '3000') + ' can be installed directly.',
+    ],
+    mac: [
+      'Download the certificate and double-click it. Keychain Access opens: add it to the System keychain.',
+      'In Keychain Access, double-click “Hearth Local CA” → Trust → When using this certificate: Always Trust. Close the window and enter your password.',
+      `Open ${primary?.https || 'the https:// address'} in Safari → File → Add to Dock (macOS Sonoma or newer), or use the install icon in Chrome or Edge.`,
+    ],
+    linux: [
+      'Chrome, Chromium or Edge: Settings → Privacy and security → Security → Manage certificates → Installed by you (or Authorities) → Import hearth-ca.crt and trust it for websites.',
+      'Firefox: Settings → Privacy & Security → Certificates → View Certificates → Authorities → Import, and tick “Trust this CA to identify websites”.',
+      `Open ${primary?.https || 'the https:// address'} and use the browser’s Install option in the address bar or menu.`,
     ],
     fire: [
       'Amazon Fire tablets: Settings → Security & Privacy → Install from storage (or Credential storage) → choose hearth-ca.crt.',
@@ -354,6 +364,7 @@ function Devices() {
       ${info.urls.map((u) => html`<div key=${u.host} class="connect-card">
         <img class="qr" src=${`/api/qr.svg?text=${encodeURIComponent(u.https || u.http)}`} alt="QR code" width="160" height="160" />
         <div>
+          ${u.label && html`<div class="connect-label">${u.label}</div>`}
           ${u.https && html`<div class="addr"><small class="muted">Secure (installable)</small><code>${u.https}</code></div>`}
           <div class="addr"><small class="muted">Plain</small><code>${u.http}</code></div>
         </div>
@@ -369,11 +380,14 @@ function Devices() {
     </div>
     ${caUrl && html`<a class="btn primary" href=${info.https.caPath} download="hearth-ca.crt"><${Icon} name="download" size=${20} /> Download certificate</a>`}
     <div class="os-tabs">
-      <${Segmented} value=${os} onChange=${setOs} small options=${[['android', 'Android'], ['ipad', 'iPad / iPhone'], ['windows', 'Windows'], ['fire', 'Fire tablet']]} />
+      <${Segmented} value=${os} onChange=${setOs} small
+        options=${[['android', 'Android'], ['ipad', 'iPad / iPhone'], ['windows', 'Windows'], ['mac', 'Mac'], ['linux', 'Linux'], ['fire', 'Fire tablet']]} />
       ${os && html`<ol class="steps">${steps[os].map((s) => html`<li>${s}</li>`)}</ol>`}
     </div>
-    <p class="muted small">Don’t want to install a certificate? On Android you can instead open chrome://flags, enable “Insecure origins treated as secure”, and add ${primary?.http || 'the http:// address'}.</p>
-    <p class="muted small">Tip: give this computer a fixed IP (a DHCP reservation in your router) so the address never changes. Hearth ${info.version} · ${info.devicesConnected} screen${info.devicesConnected === 1 ? '' : 's'} connected.</p>
+    <p class="muted small">On the computer running Hearth itself, http://localhost:${location.port || '3000'} already counts as secure, so you can install it there without a certificate.
+      On Android you can also skip the certificate: open chrome://flags, enable “Insecure origins treated as secure”, and add ${primary?.http || 'the http:// address'}.</p>
+    <p class="muted small">Tip: give this computer a fixed IP (a DHCP reservation in your router) so the address never changes${hasName ? ', or use the “by name” address' : ''}.
+      Hearth ${info.version} · ${info.devicesConnected} screen${info.devicesConnected === 1 ? '' : 's'} connected.</p>
   </div>`;
 }
 

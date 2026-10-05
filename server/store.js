@@ -51,7 +51,9 @@ export class Store {
   constructor(dataDir) {
     this.dir = dataDir;
     this.file = path.join(dataDir, 'hearth.json');
-    fs.mkdirSync(dataDir, { recursive: true });
+    // Private to the account running Hearth: it holds the PIN hash and the
+    // secret calendar links. (Ignored on Windows.)
+    fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
     this.data = this.#load();
   }
 
@@ -80,7 +82,7 @@ export class Store {
 
   #write(data) {
     const tmp = `${this.file}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
+    fs.writeFileSync(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
     try {
       fs.renameSync(tmp, this.file);
     } catch {

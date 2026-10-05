@@ -1,3 +1,4 @@
+import './preflight.js';
 import http from 'node:http';
 import https from 'node:https';
 import path from 'node:path';
@@ -10,7 +11,7 @@ import { CalendarSync } from './calendar.js';
 import { createApi } from './api.js';
 import { sseHandler } from './bus.js';
 import { ensureCertificates } from './certs.js';
-import { lanAddresses, hostnames } from './network.js';
+import { lanAddresses, hostnames, mdnsName } from './network.js';
 
 const require = createRequire(import.meta.url);
 const store = new Store(config.dataDir);
@@ -27,11 +28,15 @@ if (config.httpsEnabled) {
 
 function connectionInfo() {
   const hosts = [...new Set([...config.publicHosts, ...lanAddresses()])];
-  const urls = hosts.map((h) => ({
-    host: h,
-    http: `http://${h}:${config.port}`,
-    https: tls ? `https://${h}:${config.httpsPort}` : null,
-  }));
+  const entry = (host, label) => ({
+    host,
+    label,
+    http: `http://${host}:${config.port}`,
+    https: tls ? `https://${host}:${config.httpsPort}` : null,
+  });
+  const urls = hosts.map((h) => entry(h, 'Network address'));
+  const mdns = mdnsName();
+  if (mdns && !hosts.includes(mdns)) urls.push(entry(mdns, 'By name (keeps working if the IP changes)'));
   return {
     version: config.version,
     hostname: hostnames()[1] || 'localhost',
@@ -85,9 +90,26 @@ function listen(server, port, label) {
   return new Promise((resolve, reject) => {
     server.once('error', (err) => {
       if (err.code === 'EADDRINUSE') {
+        const envName = label === 'HTTPS' ? 'HTTPS_PORT' : 'PORT';
+        const help = {
+          win32: [
+            `Find it with   netstat -ano | findstr :${port}   then   taskkill /PID <pid> /F`,
+            `Or use another port:   $env:${envName}=${port + 1}   (cmd: set ${envName}=${port + 1})`,
+          ],
+          darwin: [
+            'If Hearth is installed as a service it is already running: launchctl print gui/$(id -u)/com.hearth.server',
+            `Otherwise find it with   lsof -nP -iTCP:${port} -sTCP:LISTEN   then   kill <pid>`,
+            `Or use another port:   ${envName}=${port + 1} npm start`,
+          ],
+          linux: [
+            'If Hearth is installed as a service it is already running: systemctl status hearth',
+            `Otherwise find it with   sudo ss -ltnp 'sport = :${port}'   then   kill <pid>`,
+            `Or use another port:   ${envName}=${port + 1} npm start`,
+          ],
+        };
         console.error(`\n  Port ${port} (${label}) is already in use. Is Hearth already running?`);
-        console.error('  Windows: find it with  netstat -ano | findstr :' + port + '  then  taskkill /PID <pid> /F');
-        console.error('  Or pick another port:  set PORT=3001  (PowerShell: $env:PORT=3001)\n');
+        for (const line of help[process.platform] || help.linux) console.error(`  ${line}`);
+        console.error('');
       }
       reject(err);
     });
@@ -125,14 +147,20 @@ async function main() {
   if (!info.urls.length) lines.push('  No network connection found. Only this computer can open Hearth.');
   lines.push(`  Data folder:        ${config.dataDir}`, '');
   console.log(lines.join('\n'));
-  if (best) {
+  // The QR code only helps someone looking at a terminal, not a service log.
+  if (best && process.stdout.isTTY) {
     const qr = await QRCode.toString(best.http, { type: 'terminal', small: true });
     console.log(`  Scan to open on a tablet or phone:\n${qr}`);
   }
-  if (process.platform === 'win32') {
-    console.log('  Other devices can\'t connect? Run scripts\\windows\\open-firewall.ps1 as Administrator.\n');
+  const firewallHint = {
+    win32: 'Run scripts\\windows\\open-firewall.ps1 as Administrator.',
+    linux: `If ufw is on: sudo ufw allow ${config.port},${config.httpsPort}/tcp   (./install.sh does this for you)`,
+    darwin: 'Check System Settings > Network > Firewall, or run ./install.sh to allow Hearth through it.',
+  };
+  if (process.stdout.isTTY) {
+    console.log(`  Other devices can't connect? ${firewallHint[process.platform] || firewallHint.linux}\n`);
+    console.log('  Press Ctrl+C to stop.\n');
   }
-  console.log('  Press Ctrl+C to stop.\n');
 
   const shutdown = () => {
     console.log('\n  Stopping Hearth...');

@@ -1,6 +1,6 @@
 # Hearth
 
-A self-hosted family wall calendar in the spirit of Skylight. Hearth runs on any computer in your house (Windows, Mac, Linux, Raspberry Pi or Docker). You open it on a wall tablet or phone by typing that computer's IP address, and you can install it as an app.
+A self-hosted family wall calendar in the spirit of Skylight. Hearth runs on any computer in your house: Windows, macOS, Ubuntu (desktop or server), Raspberry Pi or Docker. You open it on a wall tablet or phone by typing that computer's IP address, and you can install it as an app.
 
 ![Today dashboard](docs/screenshots/today.png)
 
@@ -52,14 +52,66 @@ powershell -ExecutionPolicy Bypass -File C:\Hearth\scripts\windows\install-autos
 
 > Stop Hearth with **Ctrl+C** in its window. If you close the window instead and later see "port already in use", the error message tells you the `netstat` / `taskkill` commands to clear it.
 
-## Mac, Linux or Raspberry Pi
+## Quick start on Ubuntu / Ubuntu Server
+
+This works on Ubuntu 22.04, 24.04 and 26.04 LTS (desktop or server), and also on Debian and Raspberry Pi OS. Run these as your normal user, not with `sudo`. The installer asks for your password when it needs it.
 
 ```bash
-npm install --omit=dev
-npm start
+# Get the code: git clone it, or download the ZIP and unzip it. Then:
+cd hearth
+./install.sh
 ```
 
-To run it as a service on Linux, use the systemd unit in `scripts/linux/hearth.service`.
+`install.sh` asks before each change to the system. It:
+
+1. **Sets up Node.js.** Ubuntu's own package is too old (v12 on 22.04, v18 on 24.04), so it offers Node.js 22 LTS from NodeSource, the official Linux packages. If you already have Node 20+ (from nvm, snap and so on), it uses that.
+2. **Installs Hearth's packages** with `npm ci`.
+3. **Creates a `hearth` systemd service.** It runs as your user, starts at boot, restarts if it crashes, and is sandboxed so it can only write to its data folder.
+4. **Opens the firewall** if `ufw` (or firewalld) is on. Ports 3000 and 3443 are opened to private home-network addresses only.
+5. **Offers `avahi-daemon`**, so tablets can use `http://<server-name>.local:3000`, which keeps working if the IP changes. Ubuntu Desktop already has it; Server doesn't.
+6. **Prints the addresses** to open on your tablet.
+
+Day-to-day commands:
+
+```bash
+systemctl status hearth          # is it running?
+journalctl -u hearth -f          # live log
+sudo systemctl restart hearth    # restart
+git pull && ./install.sh         # update (keeps your data)
+./install.sh --uninstall         # remove the service (keeps your data)
+```
+
+> **Time zone:** Ubuntu Server often starts out on UTC. Picking your town under Settings → Weather sets Hearth's time zone. You can also set the server's own with `sudo timedatectl set-timezone America/Chicago`.
+
+**Use the Ubuntu machine itself as the display.** On Ubuntu Desktop (or Raspberry Pi OS with a desktop), run `./install.sh --kiosk`. It adds a sign-in item that opens Hearth full screen in Chromium, Chrome or Firefox (it offers to install Chromium if none is found). It also turns off screen blanking and auto-lock. Turn on *Settings → Users → Automatic Login* so the screen comes back by itself after a power cut. Alt+F4 leaves kiosk mode.
+
+## Quick start on macOS
+
+This works on Intel and Apple Silicon Macs. macOS 13 Ventura or newer is recommended, because current Node.js releases need it.
+
+1. Put Hearth in a folder in your home folder, such as `~/hearth`. **Don't** use Desktop, Documents, Downloads or iCloud Drive, because macOS blocks background services from reading those folders. The installer warns you if you do.
+2. In Terminal:
+
+   ```bash
+   cd ~/hearth
+   ./install.sh
+   ```
+
+   If Node.js is missing, it offers `brew install node` (when Homebrew is installed), or points you to the macOS Installer at nodejs.org.
+3. It sets up a **launch agent**: Hearth starts when you sign in, restarts if it crashes, and stops the Mac from idle-sleeping while it runs. If the macOS firewall is on, it lets Node.js accept connections; this asks for your password.
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.hearth.server   # restart
+tail -f ~/Library/Logs/Hearth/hearth.log                # live log
+git pull && ./install.sh                                # update
+./install.sh --uninstall                                # remove (keeps your data)
+```
+
+For a Mac mini that should run unattended, turn on *System Settings → Users & Groups → Automatically log in*. Also turn on *Energy → Start up automatically after a power failure*.
+
+**Use the Mac itself as the display.** `./install.sh --kiosk` opens Hearth full screen in Chrome or Edge when you sign in, and keeps the display awake. If you only use Safari, open `http://localhost:3000` and choose *File → Add to Dock* (macOS 14 Sonoma or newer) to get Hearth as its own app.
+
+**Just want to try it** without a background service? Run `./scripts/start.sh`. On a Mac you can also double-click `scripts/macos/start-hearth.command` in Finder (if macOS refuses, right-click → Open). It runs until you press Ctrl+C.
 
 ## Docker
 
@@ -67,7 +119,13 @@ To run it as a service on Linux, use the systemd unit in `scripts/linux/hearth.s
 docker compose up -d
 ```
 
-Edit `docker-compose.yml` first. Set `TZ` to your time zone and `PUBLIC_HOSTS` to the LAN IP your tablets will use, so the HTTPS certificate covers it. Data is kept in `./data`.
+Edit `docker-compose.yml` first:
+
+- Set `TZ` to your time zone.
+- Set `PUBLIC_HOSTS` to the LAN IP your tablets will use, so the HTTPS certificate covers it.
+- On a Linux host you can use `network_mode: host` instead. Hearth then finds the LAN IP by itself.
+
+Data is kept in `./data`. The image builds on x86 and ARM machines (Raspberry Pi, Apple Silicon).
 
 ## Put it on the tablet as an app
 
@@ -85,7 +143,8 @@ The **Connect devices** screen shows step-by-step instructions for each kind of 
 
 Other ways to install it:
 
-- **The computer running Hearth** doesn't need the certificate. `http://localhost:3000` counts as secure, so Edge and Chrome can install it directly.
+- **The computer running Hearth** doesn't need the certificate. `http://localhost:3000` counts as secure, so Edge and Chrome can install it directly (Safari: *File → Add to Dock*).
+- **Other Macs and Linux PCs**: the Connect devices screen has certificate steps for them too (Keychain Access on a Mac; Chrome's or Firefox's certificate settings on Linux).
 - **Android without a certificate**: open `chrome://flags`, enable *Insecure origins treated as secure*, and add `http://192.168.x.x:3000`.
 
 **Tips for a wall tablet**
@@ -129,6 +188,8 @@ Everything lives in the `data` folder:
 - `calendar-cache.json` holds the last download of each synced calendar.
 - `certs/` holds the local certificate authority and server certificate. Keep `ca.key` private.
 
+On Linux and macOS the folder is readable only by the account that runs Hearth. It holds your PIN hash and your private calendar links.
+
 To back up, copy the folder. To move to another computer, copy it next to Hearth there.
 
 ## Troubleshooting
@@ -136,7 +197,11 @@ To back up, copy the folder. To move to another computer, copy it next to Hearth
 | Problem | Fix |
 | --- | --- |
 | Tablet can't open the address | Make sure both devices are on the same Wi-Fi, not a guest network. Run `open-firewall.ps1` as Administrator and check that Windows calls the network *Private*. Check the IP with `ipconfig`. |
-| "Port 3000 is already in use" | Hearth is probably still running. Run `netstat -ano \| findstr :3000`, then `taskkill /PID <pid> /F`, or set `PORT`. |
+| "Port 3000 is already in use" | Hearth is probably already running (as a service on Linux/Mac). **Windows:** `netstat -ano \| findstr :3000`, then `taskkill /PID <pid> /F`. **Linux:** `systemctl status hearth`, or `sudo ss -ltnp 'sport = :3000'`. **Mac:** `lsof -nP -iTCP:3000 -sTCP:LISTEN`. Or set `PORT`. |
+| Linux: tablet can't connect | Run `sudo ufw status`. Re-run `./install.sh` and answer yes to the firewall question, or run `sudo ufw allow from 192.168.0.0/16 to any port 3000,3443 proto tcp`. |
+| Linux: service won't start | Check `journalctl -u hearth -n 50`. If you removed or upgraded the Node.js it was installed with (nvm), re-run `./install.sh`. |
+| Mac: "Operation not permitted" in the log | Hearth is inside Desktop/Documents/Downloads/iCloud. Move it to `~/hearth` and re-run `./install.sh`. |
+| Mac: Hearth stops when the lid closes | Laptops sleep with the lid closed whatever Hearth asks for. Use a Mac that stays open, or a desktop Mac. |
 | "Not secure" on the https address | Install the certificate from Settings → Connect devices on that device. |
 | Calendar shows an error | Use the **iCal / .ics** link, not the normal web address of the calendar. |
 | No weather | Set your town in Settings → Weather. Hearth needs internet to fetch forecasts from Open-Meteo. |
@@ -149,9 +214,10 @@ To back up, copy the folder. To move to another computer, copy it next to Hearth
 - **HTTPS**: a ~150-line DER encoder plus `node:crypto` creates the CA and server certificate. No OpenSSL install is needed.
 
 ```
+install.sh   Linux/macOS installer (Node.js, packages, service, firewall, kiosk)
 server/      API, calendar sync, weather, certificates, storage
 public/      the app (index.html, app/, css/, sw.js, manifest)
-scripts/     Windows start/firewall/autostart/kiosk, Linux systemd unit
+scripts/     start.sh; windows/ (start, firewall, autostart, kiosk); linux/ and macos/ kiosk launchers
 test/        node --test suites (npm test)
 ```
 

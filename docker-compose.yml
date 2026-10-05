@@ -13,3 +13,6 @@ services:
       PUBLIC_HOSTS: 192.168.1.50
     volumes:
       - ./data:/data
+    # Linux hosts: use the host's network instead of the ports above so Hearth
+    # sees your LAN IP by itself (then PUBLIC_HOSTS isn't needed).
+    # network_mode: host

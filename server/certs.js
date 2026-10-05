@@ -185,7 +185,7 @@ function extractSubject(der) {
  */
 export function ensureCertificates(dataDir, hosts) {
   const dir = path.join(dataDir, 'certs');
-  fs.mkdirSync(dir, { recursive: true });
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const file = (n) => path.join(dir, n);
 
   let ca;

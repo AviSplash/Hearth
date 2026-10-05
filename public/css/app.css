@@ -1830,6 +1830,14 @@ h3 {
   background: #fff;
   padding: 4px;
 }
+.connect-label {
+  margin-bottom: 4px;
+  font-size: 13px;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
 .addr {
   margin: 6px 0;
 }

@@ -192,7 +192,7 @@ export class CalendarSync {
 
   #save() {
     const tmp = `${this.file}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(this.cache));
+    fs.writeFileSync(tmp, JSON.stringify(this.cache), { mode: 0o600 });
     try {
       fs.renameSync(tmp, this.file);
     } catch {

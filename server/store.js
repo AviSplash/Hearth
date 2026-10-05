@@ -1,16 +1,13 @@
-import fs from 'node:fs';
-import path from 'node:path';
 import crypto from 'node:crypto';
 
-// All household data lives in one small JSON file. Writes go to a temp file
-// first and are then renamed over the original, so a power cut mid-write can
-// never leave a half-written data file behind.
+// All household data is one small JSON document, kept by whichever storage
+// is set up (see storage/index.js): a file at home, a database in the cloud.
 
 export const newId = () => crypto.randomUUID().replace(/-/g, '').slice(0, 12);
 
 function defaultTimezone() {
   try {
-    return process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    return globalThis.process?.env?.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
   } catch {
     return 'UTC';
   }
@@ -47,89 +44,84 @@ function defaults() {
   };
 }
 
+const KEY = 'hearth';
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 export class Store {
-  constructor(dataDir) {
-    this.dir = dataDir;
-    this.file = path.join(dataDir, 'hearth.json');
-    // Private to the account running Hearth: it holds the PIN hash and the
-    // secret calendar links. (Ignored on Windows.)
-    fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-    this.data = this.#load();
+  constructor(storage) {
+    this.storage = storage;
   }
 
-  #load() {
-    const base = defaults();
-    if (!fs.existsSync(this.file)) {
-      this.#write(base);
-      return base;
+  async #read() {
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      const doc = await this.storage.read(KEY);
+      if (doc) {
+        // Fill in any keys added in newer versions.
+        const base = defaults();
+        const data = { ...base, ...doc.data, settings: { ...base.settings, ...doc.data.settings } };
+        return { data, version: doc.version };
+      }
+      const data = defaults();
+      const version = await this.storage.write(KEY, data, 0);
+      // Null means another server created it first; read theirs.
+      if (version) return { data, version };
     }
-    let parsed;
-    try {
-      parsed = JSON.parse(fs.readFileSync(this.file, 'utf8'));
-    } catch (err) {
-      // Keep the unreadable file for inspection and start from the backup.
-      const broken = `${this.file}.broken-${Date.now()}`;
-      fs.copyFileSync(this.file, broken);
-      console.error(`[store] ${this.file} is not valid JSON (${err.message}); saved a copy as ${broken}`);
-      const bak = `${this.file}.bak`;
-      parsed = fs.existsSync(bak) ? JSON.parse(fs.readFileSync(bak, 'utf8')) : base;
-    }
-    // Fill in any keys added in newer versions.
-    const data = { ...base, ...parsed, settings: { ...base.settings, ...parsed.settings } };
-    fs.copyFileSync(this.file, `${this.file}.bak`);
-    return data;
+    throw new Error(`Couldn't read or create the household data in ${this.storage.label}`);
   }
 
-  #write(data) {
-    const tmp = `${this.file}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
-    try {
-      fs.renameSync(tmp, this.file);
-    } catch {
-      // Windows can refuse the rename while antivirus has the file open.
-      fs.writeFileSync(this.file, JSON.stringify(data, null, 2));
-      fs.rmSync(tmp, { force: true });
-    }
+  /** The household data. Treat it as read-only and change it with update(). */
+  async get() {
+    return (await this.#read()).data;
   }
 
-  get() {
-    return this.data;
+  /** A number that changes whenever the household data does. */
+  version() {
+    return this.storage.version(KEY);
   }
 
-  /** Mutate the data inside `fn`, then persist. Returns fn's result. */
-  update(fn) {
-    const result = fn(this.data);
-    this.#prune();
-    this.#write(this.data);
-    return result;
+  /**
+   * Change a copy of the data inside `fn` (which must not be async), then
+   * save it. If another screen or server saved in the meantime, start again
+   * from their version so neither change is lost. Returns fn's result.
+   */
+  async update(fn) {
+    for (let attempt = 1; ; attempt++) {
+      const { data: current, version } = await this.#read();
+      const data = structuredClone(current);
+      const result = fn(data);
+      prune(data);
+      if (await this.storage.write(KEY, data, version)) return result;
+      if (attempt >= 12) throw new Error('Too many changes at once. Try again.');
+      await sleep(Math.random() * 40 * attempt);
+    }
   }
+}
 
-  #prune() {
-    // Old meal plans and chore check-offs are only useful for a while; the
-    // points they earned are kept in the running ledger below.
-    const cutoff = new Date(Date.now() - 120 * 86400_000).toISOString().slice(0, 10);
-    for (const date of Object.keys(this.data.meals)) {
-      if (date < cutoff) delete this.data.meals[date];
-    }
-    const old = this.data.completions.filter((c) => c.date < cutoff);
-    if (old.length) {
-      const ledger = (this.data.pointsLedger ||= {});
-      for (const c of old) ledger[c.memberId] = (ledger[c.memberId] || 0) + (c.points || 0);
-      this.data.completions = this.data.completions.filter((c) => c.date >= cutoff);
-    }
-    if (this.data.redemptions.length > 500) {
-      const ledger = (this.data.pointsLedger ||= {});
-      const drop = this.data.redemptions.splice(0, this.data.redemptions.length - 500);
-      for (const r of drop) ledger[r.memberId] = (ledger[r.memberId] || 0) - (r.cost || 0);
-    }
+function prune(data) {
+  // Old meal plans and chore check-offs are only useful for a while; the
+  // points they earned are kept in the running ledger below.
+  const cutoff = new Date(Date.now() - 120 * 86400_000).toISOString().slice(0, 10);
+  for (const date of Object.keys(data.meals)) {
+    if (date < cutoff) delete data.meals[date];
   }
+  const old = data.completions.filter((c) => c.date < cutoff);
+  if (old.length) {
+    const ledger = (data.pointsLedger ||= {});
+    for (const c of old) ledger[c.memberId] = (ledger[c.memberId] || 0) + (c.points || 0);
+    data.completions = data.completions.filter((c) => c.date >= cutoff);
+  }
+  if (data.redemptions.length > 500) {
+    const ledger = (data.pointsLedger ||= {});
+    const drop = data.redemptions.splice(0, data.redemptions.length - 500);
+    for (const r of drop) ledger[r.memberId] = (ledger[r.memberId] || 0) - (r.cost || 0);
+  }
+}
 
-  /** Star balance per member: everything earned minus everything spent. */
-  points() {
-    const { completions, redemptions, members, pointsLedger = {} } = this.data;
-    const totals = Object.fromEntries(members.map((m) => [m.id, pointsLedger[m.id] || 0]));
-    for (const c of completions) if (c.memberId in totals) totals[c.memberId] += c.points || 0;
-    for (const r of redemptions) if (r.memberId in totals) totals[r.memberId] -= r.cost || 0;
-    return totals;
-  }
+/** Star balance per member: everything earned minus everything spent. */
+export function points(data) {
+  const { completions, redemptions, members, pointsLedger = {} } = data;
+  const totals = Object.fromEntries(members.map((m) => [m.id, pointsLedger[m.id] || 0]));
+  for (const c of completions) if (c.memberId in totals) totals[c.memberId] += c.points || 0;
+  for (const r of redemptions) if (r.memberId in totals) totals[r.memberId] -= r.cost || 0;
+  return totals;
 }

@@ -42,8 +42,8 @@ export function verifyPinAttempt(pin, stored) {
 }
 
 export function parentOnly(store) {
-  return (req, res, next) => {
-    const stored = store.get().settings.pinHash;
+  return async (req, res, next) => {
+    const stored = (await store.get()).settings.pinHash;
     if (!stored) return next();
     const pin = req.get('x-hearth-pin');
     if (!pin) return res.status(401).json({ error: 'Parent PIN required', code: 'pin_required' });

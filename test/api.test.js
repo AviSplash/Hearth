@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import express from 'express';
 import { Store } from '../server/store.js';
+import { FileStorage } from '../server/storage/file.js';
 import { CalendarSync } from '../server/calendar.js';
 import { createApi } from '../server/api.js';
 
@@ -14,11 +15,11 @@ let dir;
 
 before(async () => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hearth-api-'));
-  const store = new Store(dir);
-  const sync = new CalendarSync(store, dir);
+  const store = new Store(new FileStorage(dir));
+  const sync = new CalendarSync(store);
   const app = express();
   app.use(express.json());
-  app.use('/api', createApi({ store, sync, system: () => ({ urls: [] }) }));
+  app.use('/api', createApi({ store, sync, system: async () => ({ urls: [] }) }));
   await new Promise((resolve) => {
     server = app.listen(0, '127.0.0.1', resolve);
   });

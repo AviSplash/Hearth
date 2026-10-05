@@ -1,0 +1,6 @@
+# Secrets for Cloudflare (the Deploy to Cloudflare button asks for these).
+# For `npx wrangler dev`, copy this file to .dev.vars and fill it in.
+# For a deployed Worker: npx wrangler secret put HEARTH_PASSWORD
+
+# The household password every screen signs in with (8 characters or more).
+HEARTH_PASSWORD=

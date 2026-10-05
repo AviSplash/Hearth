@@ -1,0 +1,23 @@
+# Render Blueprint for Hearth: Render dashboard → New → Blueprint → this repo.
+# Render asks for HEARTH_PASSWORD, the household password every screen signs
+# in with. Data is kept on a 1 GB disk, which needs a paid instance; for the
+# free plan, remove `disk` and set DATABASE_URL or Upstash instead (docs/cloud.md).
+services:
+  - type: web
+    name: hearth
+    runtime: node
+    plan: starter
+    buildCommand: npm ci --omit=dev
+    startCommand: node server/index.js
+    healthCheckPath: /api/hello
+    envVars:
+      - key: HEARTH_PASSWORD
+        sync: false
+      - key: DATA_DIR
+        value: /var/data
+      - key: NODE_VERSION
+        value: "22"
+    disk:
+      name: hearth-data
+      mountPath: /var/data
+      sizeGB: 1

@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { expandIcs, expandLocal } from '../server/calendar.js';
+import { expandIcs, expandLocal, CalendarSync } from '../server/calendar.js';
+import { Store } from '../server/store.js';
+import { MemoryStorage } from './helpers/fakes.js';
 
 const OUTLOOK = `BEGIN:VCALENDAR
 VERSION:2.0
@@ -100,4 +102,35 @@ test('all-day repeating events expand by date', () => {
   const events = [{ id: 't', title: 'Trash', allDay: true, start: '2026-10-06', end: '2026-10-07', rrule: 'FREQ=WEEKLY', memberIds: [] }];
   const out = expandLocal(events, { tz: 'America/Chicago', from: Date.parse('2026-10-05T05:00:00Z'), to: Date.parse('2026-10-19T05:00:00Z') });
   assert.deepEqual(out.map((e) => [e.start, e.end]), [['2026-10-06', '2026-10-07'], ['2026-10-13', '2026-10-14']]);
+});
+
+test('due calendars are claimed, so two servers asking at once download each feed once', async () => {
+  const storage = new MemoryStorage();
+  const store = new Store(storage);
+  await store.update((d) => {
+    d.calendars.push({ id: 'c1', name: 'School', url: 'https://example.com/a.ics', enabled: true, lastSync: null });
+  });
+  const real = globalThis.fetch;
+  let downloads = 0;
+  globalThis.fetch = async () => {
+    downloads += 1;
+    return new Response(OUTLOOK);
+  };
+  try {
+    const serverA = new CalendarSync(new Store(storage));
+    const serverB = new CalendarSync(new Store(storage));
+    const [a, b] = await Promise.all([serverA.syncDue(), serverB.syncDue()]);
+    assert.equal(a + b, 1);
+    assert.equal(downloads, 1);
+    const cal = (await store.get()).calendars[0];
+    assert.equal(cal.lastError, null);
+    assert.ok(cal.eventCount > 0);
+    assert.ok((await serverA.eventsBetween(window.from, window.to)).some((e) => e.title === 'Standup'));
+    // Fresh now, so nothing is due until syncMinutes pass.
+    assert.equal(await serverA.syncDue(), 0);
+    assert.equal(await serverA.syncDue(Date.now() + 16 * 60_000), 1);
+    assert.equal(downloads, 2);
+  } finally {
+    globalThis.fetch = real;
+  }
 });

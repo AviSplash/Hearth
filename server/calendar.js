@@ -1,13 +1,13 @@
-import fs from 'node:fs';
-import path from 'node:path';
 import ICAL from 'ical.js';
 import { broadcast } from './bus.js';
+import { fetchPublic } from './safe-fetch.js';
+import { VERSION } from './version.js';
 import { toIanaZone, utcToWall, wallToUtc, ymd, dateStartMs, addDays, isValidTimezone } from './time.js';
 
 // Calendar sync works with the iCal (.ics) links that Google Calendar,
 // Outlook/Microsoft 365, iCloud and most other services can publish. Feeds
 // are downloaded on a schedule, recurring events are expanded into a window
-// around today, and the result is cached on disk so the wall display keeps
+// around today, and the result is cached in storage so the wall display keeps
 // working while the internet is down.
 
 const PAST_DAYS = 90;
@@ -15,10 +15,13 @@ const FUTURE_DAYS = 400;
 const MAX_ITERATIONS = 50_000;
 const MAX_NOTES = 2000;
 
-function householdTz(store) {
-  const tz = store.get().settings.timezone;
+function householdTz(data) {
+  const tz = data.settings.timezone;
   return isValidTimezone(tz) ? tz : 'UTC';
 }
+
+const cacheKey = (id) => `calendars/${id}`;
+const ms = (iso) => (iso ? Date.parse(iso) || 0 : 0);
 
 function timeToValue(t, tzid, fallbackTz) {
   if (t.isDate) return ymd(t.year, t.month, t.day);
@@ -178,45 +181,63 @@ export function expandLocal(events, { tz, from, to }) {
 }
 
 export class CalendarSync {
-  constructor(store, dataDir) {
+  /** `guard` refuses links into private networks (for servers on the internet). */
+  constructor(store, { guard = false } = {}) {
     this.store = store;
-    this.file = path.join(dataDir, 'calendar-cache.json');
-    this.cache = {};
-    this.running = new Map();
-    try {
-      this.cache = JSON.parse(fs.readFileSync(this.file, 'utf8'));
-    } catch {
-      this.cache = {};
-    }
+    this.storage = store.storage;
+    this.guard = guard;
+    // Within one long-running server, don't download the same calendar twice
+    // at once. With shared storage the claim in syncDue() does this job (and
+    // Workers can't share a pending download between requests anyway).
+    this.running = store.storage.shared ? null : new Map();
   }
 
-  #save() {
-    const tmp = `${this.file}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(this.cache), { mode: 0o600 });
-    try {
-      fs.renameSync(tmp, this.file);
-    } catch {
-      fs.writeFileSync(this.file, JSON.stringify(this.cache));
-    }
-  }
-
+  /** For long-running servers: every minute, sync the calendars that are due. */
   start() {
     const tick = () => {
-      const minutes = Math.max(5, Number(this.store.get().settings.syncMinutes) || 15);
-      this.syncAll().finally(() => {
-        this.timer = setTimeout(tick, minutes * 60_000);
-        this.timer.unref?.();
-      });
+      this.syncDue()
+        .catch((err) => console.warn(`[calendar] ${err.message}`))
+        .finally(() => {
+          this.timer = setTimeout(tick, 60_000);
+          this.timer.unref?.();
+        });
     };
     tick();
   }
 
+  stop() {
+    clearTimeout(this.timer);
+  }
+
   async syncAll() {
-    const calendars = this.store.get().calendars.filter((c) => c.enabled !== false);
+    const calendars = (await this.store.get()).calendars.filter((c) => c.enabled !== false);
     await Promise.allSettled(calendars.map((c) => this.sync(c.id)));
   }
 
+  /**
+   * Sync the calendars nobody has tried for `syncMinutes`. Each one is
+   * claimed first, so other screens and servers asking at the same moment
+   * leave it alone. Returns how many were synced.
+   */
+  async syncDue(now = Date.now()) {
+    const due = (d) => {
+      const minutes = Math.max(5, Number(d.settings.syncMinutes) || 15);
+      return d.calendars.filter((c) => c.enabled !== false && now - Math.max(ms(c.lastSync), ms(c.lastAttempt)) >= minutes * 60_000);
+    };
+    if (!due(await this.store.get()).length) return 0;
+    const claimed = await this.store.update((d) => {
+      const at = new Date(now).toISOString();
+      return due(d).map((c) => {
+        c.lastAttempt = at;
+        return c.id;
+      });
+    });
+    await Promise.allSettled(claimed.map((id) => this.sync(id)));
+    return claimed.length;
+  }
+
   sync(id) {
+    if (!this.running) return this.#sync(id);
     if (this.running.has(id)) return this.running.get(id);
     const job = this.#sync(id).finally(() => this.running.delete(id));
     this.running.set(id, job);
@@ -224,18 +245,18 @@ export class CalendarSync {
   }
 
   async #sync(id) {
-    const cal = this.store.get().calendars.find((c) => c.id === id);
+    const data = await this.store.get();
+    const cal = data.calendars.find((c) => c.id === id);
     if (!cal) return;
-    const tz = householdTz(this.store);
+    const tz = householdTz(data);
     const now = Date.now();
     let result;
     try {
       const url = cal.url.trim().replace(/^webcal:\/\//i, 'https://');
-      const res = await fetch(url, {
-        headers: { 'User-Agent': 'Hearth/1.0 (family calendar)', Accept: 'text/calendar, */*' },
+      const res = await fetchPublic(url, {
+        headers: { 'User-Agent': `Hearth/${VERSION} (family calendar)`, Accept: 'text/calendar, */*' },
         signal: AbortSignal.timeout(30_000),
-        redirect: 'follow',
-      });
+      }, { guard: this.guard });
       if (!res.ok) throw new Error(`The calendar server answered ${res.status} ${res.statusText}`.trim());
       const text = await res.text();
       if (!text.includes('BEGIN:VCALENDAR')) {
@@ -247,34 +268,35 @@ export class CalendarSync {
         from: now - PAST_DAYS * 86400_000,
         to: now + FUTURE_DAYS * 86400_000,
       });
-      this.cache[id] = { syncedAt: new Date().toISOString(), events };
-      this.#save();
+      await this.storage.write(cacheKey(id), { syncedAt: new Date().toISOString(), events });
       result = { lastSync: new Date().toISOString(), lastError: null, eventCount: events.length };
     } catch (err) {
       const message = err.name === 'TimeoutError' ? 'Timed out downloading the calendar' : err.message;
       result = { lastError: message, lastAttempt: new Date().toISOString() };
       console.warn(`[calendar] ${cal.name}: ${message}`);
     }
-    this.store.update((d) => {
+    const stillThere = await this.store.update((d) => {
       const c = d.calendars.find((x) => x.id === id);
       if (c) Object.assign(c, result);
+      return !!c;
     });
+    // Removed while it was downloading.
+    if (!stillThere) await this.forget(id);
     broadcast(['events', 'calendars']);
   }
 
   forget(id) {
-    delete this.cache[id];
-    this.#save();
+    return this.storage.remove(cacheKey(id));
   }
 
   /** All events (synced + household) overlapping [from, to]. */
-  eventsBetween(from, to) {
-    const data = this.store.get();
-    const tz = householdTz(this.store);
-    const enabled = new Set(data.calendars.filter((c) => c.enabled !== false).map((c) => c.id));
+  async eventsBetween(from, to) {
+    const data = await this.store.get();
+    const tz = householdTz(data);
+    const enabled = data.calendars.filter((c) => c.enabled !== false).map((c) => cacheKey(c.id));
+    const cache = await this.storage.readMany(enabled);
     const out = [];
-    for (const [calId, entry] of Object.entries(this.cache)) {
-      if (!enabled.has(calId)) continue;
+    for (const entry of Object.values(cache)) {
       for (const ev of entry.events) {
         if (toMs(ev.end, tz) >= from && toMs(ev.start, tz) < to) out.push(ev);
       }

@@ -1,8 +1,8 @@
 import express from 'express';
 import ICAL from 'ical.js';
 import QRCode from 'qrcode';
-import { newId } from './store.js';
-import { broadcast, clientCount } from './bus.js';
+import { newId, points } from './store.js';
+import { broadcast } from './bus.js';
 import { parentOnly, hashPin, isValidPin, verifyPinAttempt } from './auth.js';
 import { getWeather, searchPlaces } from './weather.js';
 import { isValidTimezone, addDays } from './time.js';
@@ -189,8 +189,8 @@ function publicCalendar(c) {
   return { ...rest, urlHint };
 }
 
-function statePayload(store) {
-  const d = store.get();
+async function statePayload(store) {
+  const d = await store.get();
   const { pinHash, ...settings } = d.settings;
   const recent = new Date(Date.now() - 45 * 86400_000).toISOString().slice(0, 10);
   return {
@@ -201,7 +201,7 @@ function statePayload(store) {
     completions: d.completions.filter((c) => c.date >= recent),
     rewards: d.rewards,
     redemptions: d.redemptions.slice(-30),
-    points: store.points(),
+    points: points(d),
     lists: d.lists,
     meals: d.meals,
     serverTime: new Date().toISOString(),
@@ -210,33 +210,39 @@ function statePayload(store) {
 
 // ---- routes ---------------------------------------------------------------
 
-export function createApi({ store, sync, system }) {
+export function createApi({ store, sync, system, serverless = false }) {
   const api = express.Router();
   const parent = parentOnly(store);
 
-  const mutate = (scopes, fn) => {
-    const result = store.update(fn);
+  const mutate = async (scopes, fn) => {
+    const result = await store.update(fn);
     broadcast(scopes);
     return result;
   };
 
-  api.get('/state', (req, res) => res.json(statePayload(store)));
+  api.get('/state', async (req, res) => res.json(await statePayload(store)));
 
-  api.get('/events', (req, res) => {
+  // Screens that can't hold a live connection open ask this every few
+  // seconds and reload when the number changes.
+  api.get('/poll', async (req, res) => {
+    res.set('Cache-Control', 'no-store').json({ rev: await store.version() });
+  });
+
+  api.get('/events', async (req, res) => {
     const from = Date.parse(req.query.start);
     const to = Date.parse(req.query.end);
     if (Number.isNaN(from) || Number.isNaN(to) || to < from) throw new HttpError(400, 'start and end are required');
     if (to - from > 120 * 86400_000) throw new HttpError(400, 'Range too large');
-    res.json(sync.eventsBetween(from, to));
+    res.json(await sync.eventsBetween(from, to));
   });
 
   // Household events
-  api.get('/events/:id', (req, res) => {
-    res.json(find(store.get().events, req.params.id, 'Event'));
+  api.get('/events/:id', async (req, res) => {
+    res.json(find((await store.get()).events, req.params.id, 'Event'));
   });
 
-  api.post('/events', (req, res) => {
-    const ev = mutate(['events'], (d) => {
+  api.post('/events', async (req, res) => {
+    const ev = await mutate(['events'], (d) => {
       const item = { id: newId(), ...cleanEvent(req.body, null, d), createdAt: new Date().toISOString() };
       d.events.push(item);
       return item;
@@ -244,8 +250,8 @@ export function createApi({ store, sync, system }) {
     res.status(201).json(ev);
   });
 
-  api.put('/events/:id', (req, res) => {
-    const ev = mutate(['events'], (d) => {
+  api.put('/events/:id', async (req, res) => {
+    const ev = await mutate(['events'], (d) => {
       const item = find(d.events, req.params.id, 'Event');
       Object.assign(item, cleanEvent(req.body, item, d));
       return item;
@@ -253,9 +259,9 @@ export function createApi({ store, sync, system }) {
     res.json(ev);
   });
 
-  api.delete('/events/:id', (req, res) => {
+  api.delete('/events/:id', async (req, res) => {
     const occurrence = req.query.occurrence;
-    mutate(['events'], (d) => {
+    await mutate(['events'], (d) => {
       const item = find(d.events, req.params.id, 'Event');
       if (occurrence && isYmd(occurrence) && item.rrule) {
         item.exdates = [...new Set([...(item.exdates || []), occurrence])];
@@ -267,8 +273,8 @@ export function createApi({ store, sync, system }) {
   });
 
   // Family members
-  api.post('/members', parent, (req, res) => {
-    const m = mutate(['state'], (d) => {
+  api.post('/members', parent, async (req, res) => {
+    const m = await mutate(['state'], (d) => {
       const item = { id: newId(), ...cleanMember(req.body, null, d) };
       d.members.push(item);
       return item;
@@ -276,8 +282,8 @@ export function createApi({ store, sync, system }) {
     res.status(201).json(m);
   });
 
-  api.put('/members/:id', parent, (req, res) => {
-    const m = mutate(['state', 'events'], (d) => {
+  api.put('/members/:id', parent, async (req, res) => {
+    const m = await mutate(['state', 'events'], (d) => {
       const item = find(d.members, req.params.id, 'Person');
       Object.assign(item, cleanMember(req.body, item, d));
       return item;
@@ -285,8 +291,8 @@ export function createApi({ store, sync, system }) {
     res.json(m);
   });
 
-  api.delete('/members/:id', parent, (req, res) => {
-    mutate(['state', 'events'], (d) => {
+  api.delete('/members/:id', parent, async (req, res) => {
+    await mutate(['state', 'events'], (d) => {
       const id = find(d.members, req.params.id, 'Person').id;
       d.members = d.members.filter((m) => m.id !== id);
       for (const c of d.chores) c.memberIds = c.memberIds.filter((x) => x !== id);
@@ -298,9 +304,9 @@ export function createApi({ store, sync, system }) {
     res.status(204).end();
   });
 
-  api.post('/members/reorder', parent, (req, res) => {
+  api.post('/members/reorder', parent, async (req, res) => {
     const order = Array.isArray(req.body.ids) ? req.body.ids : [];
-    mutate(['state'], (d) => {
+    await mutate(['state'], (d) => {
       d.members.sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
     });
     res.status(204).end();
@@ -308,18 +314,18 @@ export function createApi({ store, sync, system }) {
 
   // Synced calendars (iCal links)
   api.post('/calendars', parent, async (req, res) => {
-    const cal = mutate(['calendars'], (d) => {
+    const cal = await mutate(['calendars'], (d) => {
       const item = { id: newId(), ...cleanCalendar(req.body, null), lastSync: null, lastError: null, eventCount: 0 };
       d.calendars.push(item);
       return item;
     });
     await sync.sync(cal.id);
-    res.status(201).json(publicCalendar(store.get().calendars.find((c) => c.id === cal.id)));
+    res.status(201).json(publicCalendar((await store.get()).calendars.find((c) => c.id === cal.id)));
   });
 
   api.put('/calendars/:id', parent, async (req, res) => {
     let urlChanged = false;
-    const cal = mutate(['calendars', 'events'], (d) => {
+    const cal = await mutate(['calendars', 'events'], (d) => {
       const item = find(d.calendars, req.params.id, 'Calendar');
       const next = cleanCalendar(req.body, item);
       urlChanged = next.url !== item.url;
@@ -327,32 +333,35 @@ export function createApi({ store, sync, system }) {
       return item;
     });
     if (urlChanged) await sync.sync(cal.id);
-    res.json(publicCalendar(store.get().calendars.find((c) => c.id === cal.id)));
+    res.json(publicCalendar((await store.get()).calendars.find((c) => c.id === cal.id)));
   });
 
-  api.delete('/calendars/:id', parent, (req, res) => {
-    mutate(['calendars', 'events'], (d) => {
+  api.delete('/calendars/:id', parent, async (req, res) => {
+    await mutate(['calendars', 'events'], (d) => {
       find(d.calendars, req.params.id, 'Calendar');
       d.calendars = d.calendars.filter((c) => c.id !== req.params.id);
     });
-    sync.forget(req.params.id);
+    await sync.forget(req.params.id);
     res.status(204).end();
   });
 
   api.post('/calendars/:id/sync', async (req, res) => {
-    find(store.get().calendars, req.params.id, 'Calendar');
+    find((await store.get()).calendars, req.params.id, 'Calendar');
     await sync.sync(req.params.id);
-    res.json(publicCalendar(store.get().calendars.find((c) => c.id === req.params.id)));
+    res.json(publicCalendar((await store.get()).calendars.find((c) => c.id === req.params.id)));
   });
 
+  // ?due=1 only syncs calendars nobody has checked lately. Screens call it
+  // every few minutes on serverless hosts, which have no timer of their own.
   api.post('/calendars/sync', async (req, res) => {
-    await sync.syncAll();
+    if (req.query.due) await sync.syncDue();
+    else await sync.syncAll();
     res.status(204).end();
   });
 
   // Chores
-  api.post('/chores', parent, (req, res) => {
-    const chore = mutate(['state'], (d) => {
+  api.post('/chores', parent, async (req, res) => {
+    const chore = await mutate(['state'], (d) => {
       const item = { id: newId(), ...cleanChore(req.body, null, d), createdAt: new Date().toISOString() };
       d.chores.push(item);
       return item;
@@ -360,8 +369,8 @@ export function createApi({ store, sync, system }) {
     res.status(201).json(chore);
   });
 
-  api.put('/chores/:id', parent, (req, res) => {
-    const chore = mutate(['state'], (d) => {
+  api.put('/chores/:id', parent, async (req, res) => {
+    const chore = await mutate(['state'], (d) => {
       const item = find(d.chores, req.params.id, 'Chore');
       Object.assign(item, cleanChore(req.body, item, d));
       return item;
@@ -369,34 +378,31 @@ export function createApi({ store, sync, system }) {
     res.json(chore);
   });
 
-  api.delete('/chores/:id', parent, (req, res) => {
-    mutate(['state'], (d) => {
+  api.delete('/chores/:id', parent, async (req, res) => {
+    await mutate(['state'], (d) => {
       find(d.chores, req.params.id, 'Chore');
       d.chores = d.chores.filter((c) => c.id !== req.params.id);
     });
     res.status(204).end();
   });
 
-  api.post('/chores/:id/toggle', (req, res) => {
+  api.post('/chores/:id/toggle', async (req, res) => {
     const { memberId, date } = req.body;
     if (!isYmd(date)) throw new HttpError(400, 'date is required');
-    const done = mutate(['state'], (d) => {
+    const result = await mutate(['state'], (d) => {
       const chore = find(d.chores, req.params.id, 'Chore');
       if (!chore.memberIds.includes(memberId)) throw new HttpError(400, 'That chore is not assigned to this person');
       const idx = d.completions.findIndex((c) => c.choreId === chore.id && c.memberId === memberId && c.date === date);
-      if (idx >= 0) {
-        d.completions.splice(idx, 1);
-        return false;
-      }
-      d.completions.push({ id: newId(), choreId: chore.id, memberId, date, points: chore.points, at: new Date().toISOString() });
-      return true;
+      if (idx >= 0) d.completions.splice(idx, 1);
+      else d.completions.push({ id: newId(), choreId: chore.id, memberId, date, points: chore.points, at: new Date().toISOString() });
+      return { done: idx < 0, points: points(d) };
     });
-    res.json({ done, points: store.points() });
+    res.json(result);
   });
 
   // Rewards
-  api.post('/rewards', parent, (req, res) => {
-    const r = mutate(['state'], (d) => {
+  api.post('/rewards', parent, async (req, res) => {
+    const r = await mutate(['state'], (d) => {
       const item = { id: newId(), ...cleanReward(req.body, null) };
       d.rewards.push(item);
       return item;
@@ -404,8 +410,8 @@ export function createApi({ store, sync, system }) {
     res.status(201).json(r);
   });
 
-  api.put('/rewards/:id', parent, (req, res) => {
-    const r = mutate(['state'], (d) => {
+  api.put('/rewards/:id', parent, async (req, res) => {
+    const r = await mutate(['state'], (d) => {
       const item = find(d.rewards, req.params.id, 'Reward');
       Object.assign(item, cleanReward(req.body, item));
       return item;
@@ -413,19 +419,19 @@ export function createApi({ store, sync, system }) {
     res.json(r);
   });
 
-  api.delete('/rewards/:id', parent, (req, res) => {
-    mutate(['state'], (d) => {
+  api.delete('/rewards/:id', parent, async (req, res) => {
+    await mutate(['state'], (d) => {
       find(d.rewards, req.params.id, 'Reward');
       d.rewards = d.rewards.filter((r) => r.id !== req.params.id);
     });
     res.status(204).end();
   });
 
-  api.post('/rewards/:id/redeem', parent, (req, res) => {
-    const result = mutate(['state'], (d) => {
+  api.post('/rewards/:id/redeem', parent, async (req, res) => {
+    const result = await mutate(['state'], (d) => {
       const reward = find(d.rewards, req.params.id, 'Reward');
       const member = find(d.members, req.body.memberId, 'Person');
-      const balance = store.points()[member.id] || 0;
+      const balance = points(d)[member.id] || 0;
       if (balance < reward.cost) throw new HttpError(400, `${member.name} needs ${reward.cost - balance} more stars`);
       const entry = {
         id: newId(),
@@ -443,8 +449,8 @@ export function createApi({ store, sync, system }) {
   });
 
   // Lists
-  api.post('/lists', (req, res) => {
-    const list = mutate(['state'], (d) => {
+  api.post('/lists', async (req, res) => {
+    const list = await mutate(['state'], (d) => {
       const item = { id: newId(), name: required(text(req.body.name, 60), 'List name'), emoji: emoji(req.body.emoji, '📝'), items: [] };
       d.lists.push(item);
       return item;
@@ -452,8 +458,8 @@ export function createApi({ store, sync, system }) {
     res.status(201).json(list);
   });
 
-  api.put('/lists/:id', (req, res) => {
-    const list = mutate(['state'], (d) => {
+  api.put('/lists/:id', async (req, res) => {
+    const list = await mutate(['state'], (d) => {
       const item = find(d.lists, req.params.id, 'List');
       if (req.body.name !== undefined) item.name = required(text(req.body.name, 60), 'List name');
       if (req.body.emoji !== undefined) item.emoji = emoji(req.body.emoji, '📝');
@@ -462,16 +468,16 @@ export function createApi({ store, sync, system }) {
     res.json(list);
   });
 
-  api.delete('/lists/:id', (req, res) => {
-    mutate(['state'], (d) => {
+  api.delete('/lists/:id', async (req, res) => {
+    await mutate(['state'], (d) => {
       find(d.lists, req.params.id, 'List');
       d.lists = d.lists.filter((l) => l.id !== req.params.id);
     });
     res.status(204).end();
   });
 
-  api.post('/lists/:id/items', (req, res) => {
-    const item = mutate(['state'], (d) => {
+  api.post('/lists/:id/items', async (req, res) => {
+    const item = await mutate(['state'], (d) => {
       const list = find(d.lists, req.params.id, 'List');
       const entry = { id: newId(), text: required(text(req.body.text, 200), 'Item'), done: false, at: new Date().toISOString() };
       list.items.unshift(entry);
@@ -480,8 +486,8 @@ export function createApi({ store, sync, system }) {
     res.status(201).json(item);
   });
 
-  api.put('/lists/:id/items/:itemId', (req, res) => {
-    const item = mutate(['state'], (d) => {
+  api.put('/lists/:id/items/:itemId', async (req, res) => {
+    const item = await mutate(['state'], (d) => {
       const list = find(d.lists, req.params.id, 'List');
       const entry = find(list.items, req.params.itemId, 'Item');
       if (req.body.text !== undefined) entry.text = required(text(req.body.text, 200), 'Item');
@@ -494,16 +500,16 @@ export function createApi({ store, sync, system }) {
     res.json(item);
   });
 
-  api.delete('/lists/:id/items/:itemId', (req, res) => {
-    mutate(['state'], (d) => {
+  api.delete('/lists/:id/items/:itemId', async (req, res) => {
+    await mutate(['state'], (d) => {
       const list = find(d.lists, req.params.id, 'List');
       list.items = list.items.filter((i) => i.id !== req.params.itemId);
     });
     res.status(204).end();
   });
 
-  api.post('/lists/:id/clear-done', (req, res) => {
-    mutate(['state'], (d) => {
+  api.post('/lists/:id/clear-done', async (req, res) => {
+    await mutate(['state'], (d) => {
       const list = find(d.lists, req.params.id, 'List');
       list.items = list.items.filter((i) => !i.done);
     });
@@ -512,9 +518,9 @@ export function createApi({ store, sync, system }) {
 
   // Meals
   const MEALS = ['breakfast', 'lunch', 'dinner', 'snack'];
-  api.put('/meals/:date', (req, res) => {
+  api.put('/meals/:date', async (req, res) => {
     if (!isYmd(req.params.date)) throw new HttpError(400, 'Invalid date');
-    const day = mutate(['state'], (d) => {
+    const day = await mutate(['state'], (d) => {
       const entry = { ...(d.meals[req.params.date] || {}) };
       for (const m of MEALS) if (req.body[m] !== undefined) entry[m] = text(req.body[m], 120);
       const empty = MEALS.every((m) => !entry[m]);
@@ -526,27 +532,32 @@ export function createApi({ store, sync, system }) {
   });
 
   // Settings & PIN
-  api.put('/settings', parent, (req, res) => {
-    const before = store.get().settings;
-    mutate(['state', 'weather'], (d) => {
+  api.put('/settings', parent, async (req, res) => {
+    const before = (await store.get()).settings;
+    await mutate(['state', 'weather'], (d) => {
       d.settings = cleanSettings(req.body, d.settings);
     });
-    if (before.timezone !== store.get().settings.timezone) sync.syncAll();
-    res.json(statePayload(store).settings);
+    if (before.timezone !== (await store.get()).settings.timezone) {
+      // Re-expand synced calendars in the new zone. Serverless hosts stop
+      // working once the response is sent, so there it has to finish first.
+      const job = sync.syncAll().catch((err) => console.warn(`[calendar] ${err.message}`));
+      if (serverless) await job;
+    }
+    res.json((await statePayload(store)).settings);
   });
 
-  api.post('/pin/check', (req, res) => {
-    const stored = store.get().settings.pinHash;
+  api.post('/pin/check', async (req, res) => {
+    const stored = (await store.get()).settings.pinHash;
     if (!stored) return res.json({ ok: true });
     const result = verifyPinAttempt(String(req.body.pin || ''), stored);
     if (!result.ok) return res.json({ ok: false, error: result.locked ? 'Too many tries. Wait 30 seconds.' : 'Wrong PIN' });
     res.json({ ok: true });
   });
 
-  api.put('/pin', parent, (req, res) => {
+  api.put('/pin', parent, async (req, res) => {
     const next = req.body.pin;
     if (next !== null && !isValidPin(next)) throw new HttpError(400, 'PIN must be 4 to 8 digits');
-    mutate(['state'], (d) => {
+    await mutate(['state'], (d) => {
       d.settings.pinHash = next ? hashPin(next) : null;
     });
     res.status(204).end();
@@ -554,7 +565,7 @@ export function createApi({ store, sync, system }) {
 
   // Weather
   api.get('/weather', async (req, res) => {
-    const { location, units } = store.get().settings;
+    const { location, units } = (await store.get()).settings;
     if (!location) return res.json(null);
     try {
       res.json(await getWeather(location, units));
@@ -574,8 +585,8 @@ export function createApi({ store, sync, system }) {
   });
 
   // Connection info for the "Connect a device" screen
-  api.get('/system', (req, res) => {
-    res.json({ ...system(), devicesConnected: clientCount() });
+  api.get('/system', async (req, res) => {
+    res.json(await system(req));
   });
 
   api.get('/qr.svg', async (req, res) => {

@@ -3,6 +3,7 @@ import { useEffect, useReducer, useState, useRef } from '/vendor/preact-htm.js';
 // One shared app object. Components call useApp() to re-render when it
 // changes. The server pushes "something changed" over Server-Sent Events, so
 // a chore checked off on a phone shows up on the wall tablet within a second.
+// (In the cloud, where there can be many servers, screens poll instead.)
 
 const CACHE_KEY = 'hearth:state';
 const listeners = new Set();
@@ -23,6 +24,11 @@ export const app = {
   eventsVersion: 0,
   toasts: [],
   pinRequest: null,
+  // From /api/hello: mode (home or cloud), live (sse or poll), loginRequired...
+  server: null,
+  needsLogin: false,
+  // Set-up problems the person who deployed Hearth needs to fix.
+  problems: null,
 };
 
 let version = 0;
@@ -100,6 +106,10 @@ export async function api(path, { method = 'GET', body } = {}) {
   }
   if (res.status === 401) {
     const err = await res.json().catch(() => ({}));
+    if (err.code === 'login_required') {
+      signedOut();
+      throw new Cancelled('signed out');
+    }
     if (err.code === 'pin_required' || err.code === 'pin_wrong') {
       forgetPin();
       const entered = await requestPin(err.code === 'pin_wrong' ? 'That PIN didn’t work' : null);
@@ -142,18 +152,97 @@ export async function attempt(fn, success) {
   }
 }
 
+// ---- signing in --------------------------------------------------------------
+
+async function loadHello() {
+  try {
+    app.server = await api('/hello');
+  } catch {
+    app.online = false;
+    emit();
+    return false;
+  }
+  app.needsLogin = app.server.loginRequired && !app.server.signedIn;
+  app.problems = app.server.problems?.length ? app.server.problems : null;
+  emit();
+  return true;
+}
+
+let live = false;
+
+/** True until the app has loaded and is listening for changes. */
+export function needsStart() {
+  return !live && !app.needsLogin;
+}
+
+/** Load everything and start listening for changes, once signed in. */
+export async function start() {
+  if ((!app.server || app.problems) && !(await loadHello())) return false;
+  if (app.needsLogin || app.problems) return false;
+  refreshState();
+  refreshWeather();
+  if (!live) {
+    live = true;
+    connectLive();
+  }
+  return true;
+}
+
+/** Returns an error message, or null once signed in. */
+export async function login(password) {
+  try {
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    await api('/login', { method: 'POST', body: { password, timezone } });
+  } catch (err) {
+    return err.message;
+  }
+  app.needsLogin = false;
+  emit();
+  start();
+  return null;
+}
+
+export async function logout() {
+  await api('/logout', { method: 'POST' }).catch(() => {});
+  signedOut();
+}
+
+/** Forget everything this screen saved, so nothing private stays on it. */
+function signedOut() {
+  forgetPin();
+  app.state = null;
+  app.weather = null;
+  app.needsLogin = true;
+  eventCache.clear();
+  try {
+    localStorage.removeItem(CACHE_KEY);
+  } catch {
+    /* ignore */
+  }
+  if (typeof caches !== 'undefined') {
+    caches.keys().then((keys) => keys.filter((k) => k.startsWith('hearth-api')).forEach((k) => caches.delete(k))).catch(() => {});
+  }
+  emit();
+}
+
 // ---- loading ---------------------------------------------------------------
 
 export async function refreshState() {
   try {
+    const before = app.state?.settings;
     app.state = await api('/state');
+    // Polling screens don't hear about weather changes separately.
+    const after = app.state.settings;
+    if (before && (before.units !== after.units || JSON.stringify(before.location) !== JSON.stringify(after.location))) {
+      refreshWeather();
+    }
     try {
       localStorage.setItem(CACHE_KEY, JSON.stringify(app.state));
     } catch {
       /* storage full or blocked; the app still works */
     }
-  } catch {
-    app.online = false;
+  } catch (err) {
+    if (!(err instanceof Cancelled)) app.online = false;
   }
   emit();
 }
@@ -188,6 +277,7 @@ export function patchState(fn) {
 }
 
 export function connectLive() {
+  if (app.server?.live === 'poll') return pollForChanges(app.server.pollSeconds || 15);
   let source;
   const open = () => {
     source = new EventSource('/api/stream');
@@ -217,6 +307,43 @@ export function connectLive() {
     refreshState();
     bumpEvents();
   }, 5 * 60_000);
+}
+
+/** Ask the server every few seconds whether anything changed. */
+function pollForChanges(seconds) {
+  let rev = null;
+  const check = async () => {
+    if (document.hidden || app.needsLogin) return;
+    try {
+      const res = await api('/poll');
+      if (rev !== null && res.rev !== rev) {
+        refreshState();
+        bumpEvents();
+      }
+      rev = res.rev;
+      if (!app.online) {
+        app.online = true;
+        emit();
+      }
+    } catch (err) {
+      if (!(err instanceof Cancelled) && app.online) {
+        app.online = false;
+        emit();
+      }
+    }
+  };
+  // Serverless hosts have no clock of their own, so screens remind them to
+  // refresh synced calendars (the server skips any that are still fresh).
+  const syncCalendars = () => {
+    if (!document.hidden && !app.needsLogin) api('/calendars/sync?due=1', { method: 'POST' }).catch(() => {});
+  };
+  check();
+  syncCalendars();
+  setInterval(check, seconds * 1000);
+  setInterval(syncCalendars, 5 * 60_000);
+  setInterval(refreshWeather, 15 * 60_000);
+  document.addEventListener('visibilitychange', check);
+  window.addEventListener('online', check);
 }
 
 // ---- hooks -----------------------------------------------------------------

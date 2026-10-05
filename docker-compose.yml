@@ -1,0 +1,18 @@
+services:
+  hearth:
+    build: .
+    container_name: hearth
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+      - "3443:3443"
+    environment:
+      TZ: America/Chicago
+      # The LAN address (and/or DNS name) tablets use to reach this machine,
+      # so the HTTPS certificate covers it. Comma-separated.
+      PUBLIC_HOSTS: 192.168.1.50
+    volumes:
+      - ./data:/data
+    # Linux hosts: use the host's network instead of the ports above so Hearth
+    # sees your LAN IP by itself (then PUBLIC_HOSTS isn't needed).
+    # network_mode: host

@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#f6f1ea" />
+  <meta name="description" content="Family calendar, chores and dashboard" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="Hearth" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="icon" href="/icons/icon.svg" type="image/svg+xml" />
+  <link rel="icon" href="/icons/icon-192.png" type="image/png" sizes="192x192" />
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+  <link rel="stylesheet" href="/css/app.css" />
+  <title>Hearth</title>
+  <script>
+    // Pick light/dark before first paint so the screen doesn't flash.
+    try { document.documentElement.dataset.theme = localStorage.getItem('hearth:theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'); } catch (e) {}
+  </script>
+</head>
+<body>
+  <div id="app"><div class="boot"><img src="/icons/icon.svg" alt="" width="88" height="88" /><p>Loading Hearth…</p></div></div>
+  <noscript>Hearth needs JavaScript turned on.</noscript>
+  <script type="module" src="/app/main.js"></script>
+</body>
+</html>

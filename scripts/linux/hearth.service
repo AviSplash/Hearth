@@ -1,0 +1,21 @@
+# systemd unit for Linux / Raspberry Pi.
+#   sudo cp scripts/linux/hearth.service /etc/systemd/system/
+#   (edit User= and WorkingDirectory= below)
+#   sudo systemctl enable --now hearth
+[Unit]
+Description=Hearth family calendar
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/hearth
+ExecStart=/usr/bin/env node server/index.js
+Restart=always
+RestartSec=5
+Environment=PORT=3000
+Environment=HTTPS_PORT=3443
+
+[Install]
+WantedBy=multi-user.target

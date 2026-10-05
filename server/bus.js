@@ -1,7 +1,10 @@
 // Server-Sent Events hub. Every open tablet/phone keeps one connection and
-// refreshes its data whenever another device changes something.
+// refreshes its data whenever another device changes something. This needs
+// one long-running server that sees every change; when data lives in shared
+// cloud storage, screens poll /api/poll instead.
 
 const clients = new Set();
+let pinger = null;
 
 export function sseHandler(req, res) {
   res.set({
@@ -15,6 +18,12 @@ export function sseHandler(req, res) {
   res.write(`event: hello\ndata: ${JSON.stringify({ at: Date.now() })}\n\n`);
   clients.add(res);
   req.on('close', () => clients.delete(res));
+  // Keep proxies from closing quiet connections. Started here rather than at
+  // load time, because serverless hosts don't allow timers outside a request.
+  pinger ||= setInterval(() => {
+    for (const c of clients) c.write(': ping\n\n');
+  }, 25_000);
+  pinger.unref?.();
 }
 
 export function broadcast(scopes) {
@@ -25,7 +34,3 @@ export function broadcast(scopes) {
 export function clientCount() {
   return clients.size;
 }
-
-setInterval(() => {
-  for (const res of clients) res.write(': ping\n\n');
-}, 25_000).unref();

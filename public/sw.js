@@ -1,10 +1,10 @@
-// Hearth service worker: the server is on the local network, so always try
-// it first, and fall back to the last saved copy when it can't be reached
-// (Wi-Fi blip, server rebooting). That keeps the wall screen showing the
-// calendar instead of an error page.
+// Hearth service worker: always try the server first, and fall back to the
+// last saved copy when it can't be reached (Wi-Fi blip, server rebooting,
+// internet down). That keeps the wall screen showing the calendar instead of
+// an error page.
 
-const CACHE = 'hearth-v1';
-const API_CACHE = 'hearth-api-v1';
+const CACHE = 'hearth-v2';
+const API_CACHE = 'hearth-api-v2';
 const API_ENTRIES = 40;
 const CORE = ['/', '/css/app.css', '/app/main.js', '/vendor/preact-htm.js', '/manifest.webmanifest', '/icons/icon.svg'];
 
@@ -33,7 +33,9 @@ self.addEventListener('fetch', (event) => {
   const req = event.request;
   const url = new URL(req.url);
   if (req.method !== 'GET' || url.origin !== self.location.origin) return;
-  if (url.pathname === '/api/stream' || url.pathname.endsWith('.crt') || url.pathname.endsWith('.pem')) return;
+  // Live updates and change checks are only useful fresh.
+  if (url.pathname === '/api/stream' || url.pathname === '/api/poll') return;
+  if (url.pathname.endsWith('.crt') || url.pathname.endsWith('.pem')) return;
 
   event.respondWith(
     (async () => {

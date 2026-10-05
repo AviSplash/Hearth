@@ -2,6 +2,8 @@
 
 A self-hosted family wall calendar in the spirit of Skylight. Hearth runs on any computer in your house: Windows, macOS, Ubuntu (desktop or server), Raspberry Pi or Docker. You open it on a wall tablet or phone by typing that computer's IP address, and you can install it as an app.
 
+**New in 1.5:** Hearth can also run in the cloud, on Vercel, Cloudflare, Render, Fly.io, Railway or any Docker host. Then there's nothing to keep running at home, and phones can reach it from anywhere. See [Run it in the cloud](#run-it-in-the-cloud).
+
 ![Today dashboard](docs/screenshots/today.png)
 
 | Week | Chores |
@@ -18,7 +20,7 @@ A self-hosted family wall calendar in the spirit of Skylight. Hearth runs on any
 - **Live sync**: when a chore is checked off on a phone, the wall tablet shows it about a second later.
 - **Parent PIN**: kids can check off chores and add to lists, while settings, chores and rewards need the PIN.
 - **Made for a wall screen**: installs as a full-screen app and keeps the screen awake. It can dim at night and goes back to Today after a few idle minutes. It keeps working through Wi-Fi blips.
-- **No cloud account, no build step, no native modules.** Everything is stored in one JSON file on your computer.
+- **No cloud account, no build step, no native modules.** At home, everything is stored in one JSON file on your computer. In the cloud, it goes in a small database instead, behind a household password.
 
 ## Quick start on Windows
 
@@ -27,7 +29,7 @@ A self-hosted family wall calendar in the spirit of Skylight. Hearth runs on any
 3. Double-click **`scripts\windows\start-hearth.bat`**. The first run installs what it needs. The window then shows something like:
 
    ```
-   Hearth 1.0.0 is running
+   Hearth 1.5.0 is running
 
    On this computer:   http://localhost:3000
    On your network:    http://192.168.1.50:3000   (secure: https://192.168.1.50:3443)
@@ -127,6 +129,22 @@ Edit `docker-compose.yml` first:
 
 Data is kept in `./data`. The image builds on x86 and ARM machines (Raspberry Pi, Apple Silicon).
 
+## Run it in the cloud
+
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FAviSplash%2FHearth&project-name=hearth&repository-name=hearth&env=HEARTH_PASSWORD&envDescription=The%20household%20password%20every%20screen%20signs%20in%20with%20%288%20or%20more%20characters%29&envLink=https%3A%2F%2Fgithub.com%2FAviSplash%2FHearth%2Fblob%2Fmain%2Fdocs%2Fcloud.md%23the-household-password&stores=%5B%7B%22type%22%3A%22integration%22%2C%22protocol%22%3A%22storage%22%2C%22productSlug%22%3A%22upstash-kv%22%2C%22integrationSlug%22%3A%22upstash%22%7D%5D)
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/AviSplash/Hearth)
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/AviSplash/Hearth)
+
+Instead of a computer at home, Hearth can run on a hosting service. Tablets and phones open it at an https address from anywhere, and it installs as an app without the certificate step below.
+
+- **Vercel**: click the button. It sets up an Upstash Redis database and asks for a household password.
+- **Cloudflare Workers**: click the button, or run `npx wrangler deploy` and then `npx wrangler secret put HEARTH_PASSWORD`. Data goes in Cloudflare D1.
+- **Render, Fly.io, Railway, or any Docker or Node.js host**: run it with a small disk for `data`, or with `DATABASE_URL` (PostgreSQL).
+
+Every cloud setup needs **`HEARTH_PASSWORD`**. Each screen signs in with it once and then stays signed in. On Vercel and Cloudflare, other screens see changes within about 15 seconds rather than straight away. Calendars must use public iCal links, since a cloud server can't reach your home network.
+
+[docs/cloud.md](docs/cloud.md) has step-by-step instructions for each host, plus how to move your existing data into the cloud and back it up.
+
 ## Put it on the tablet as an app
 
 Browsers only offer **Install app**, full-screen mode and keep-screen-on over HTTPS. A home server has no public domain, so Hearth creates its own small certificate authority the first time it runs. You trust it once per device:
@@ -177,6 +195,10 @@ Treat the secret links like passwords. Hearth never sends them back to the brows
 | `DATA_DIR` | `./data` | Where data and certificates are stored |
 | `PUBLIC_HOSTS` | *(none)* | Extra IPs or hostnames for the certificate and Connect screen, comma-separated |
 | `TZ` | system | Time zone (mainly useful in Docker) |
+| `HEARTH_PASSWORD` | *(none)* | Make every screen sign in with this password (8+ characters). Required in the cloud. |
+| `HEARTH_MODE` | detected | `cloud` for a server on the internet, otherwise `home` |
+
+The cloud settings (storage, database links, how often screens check for changes) are listed in [docs/cloud.md](docs/cloud.md#settings-you-can-change-with-environment-variables).
 
 On Windows (PowerShell): `$env:PORT=3001; node server\index.js`
 
@@ -185,12 +207,14 @@ On Windows (PowerShell): `$env:PORT=3001; node server\index.js`
 Everything lives in the `data` folder:
 
 - `hearth.json` holds family, chores, events, lists, meals and settings. `hearth.json.bak` is the previous copy.
-- `calendar-cache.json` holds the last download of each synced calendar.
+- `calendars/` holds the last download of each synced calendar.
 - `certs/` holds the local certificate authority and server certificate. Keep `ca.key` private.
 
 On Linux and macOS the folder is readable only by the account that runs Hearth. It holds your PIN hash and your private calendar links.
 
-To back up, copy the folder. To move to another computer, copy it next to Hearth there.
+To back up, copy the folder. To move to another computer, copy it next to Hearth there. To move it into the cloud, use `scripts/move-data.js` ([docs/cloud.md](docs/cloud.md#moving-your-data)).
+
+In the cloud, the same data lives in Upstash Redis, PostgreSQL or Cloudflare D1, as one row per document in a `hearth_documents` table (or a `hearth:` key in Redis).
 
 ## Troubleshooting
 
@@ -209,16 +233,21 @@ To back up, copy the folder. To move to another computer, copy it next to Hearth
 
 ## How it's built
 
-- **Server**: Node.js 20+ and Express. Data is a JSON file with atomic writes. Calendar parsing and recurrence use [ical.js](https://github.com/kewisch/ical.js), weather comes from [Open-Meteo](https://open-meteo.com), and live updates use Server-Sent Events.
+- **Server**: Node.js 20+ and Express. Data is a JSON document with atomic writes: a file at home, or Upstash Redis, PostgreSQL or Cloudflare D1 in the cloud. Each save checks a version number first, so two screens saving at once can't overwrite each other. Calendar parsing and recurrence use [ical.js](https://github.com/kewisch/ical.js), and weather comes from [Open-Meteo](https://open-meteo.com). Live updates use Server-Sent Events; on serverless hosts, screens poll a change counter instead.
+- **Cloud**: the same Express app runs on Vercel (as one function, from `app.js`) and on Cloudflare Workers (through Cloudflare's Node.js HTTP server support, from `server/cloudflare.js`).
 - **App**: Preact and htm, loaded as plain ES modules, so there's no bundler or build step. A service worker loads from the network first and falls back to its cache. There's a manifest for install, and screen wake lock where the browser allows it.
 - **HTTPS**: a ~150-line DER encoder plus `node:crypto` creates the CA and server certificate. No OpenSSL install is needed.
 
 ```
-install.sh   Linux/macOS installer (Node.js, packages, service, firewall, kiosk)
-server/      API, calendar sync, weather, certificates, storage
-public/      the app (index.html, app/, css/, sw.js, manifest)
-scripts/     start.sh; windows/ (start, firewall, autostart, kiosk); linux/ and macos/ kiosk launchers
-test/        node --test suites (npm test)
+install.sh      Linux/macOS installer (Node.js, packages, service, firewall, kiosk)
+server/         API, sign-in, calendar sync, weather, certificates
+server/storage/ where data is kept: files, Upstash Redis, PostgreSQL, Cloudflare D1
+public/         the app (index.html, app/, css/, sw.js, manifest, vendor/ Preact)
+app.js          entry point for Vercel
+wrangler.jsonc  Cloudflare Workers setup (entry point: server/cloudflare.js)
+render.yaml     Render Blueprint
+scripts/        start.sh, move-data.js; windows/ (start, firewall, autostart, kiosk); linux/ and macos/ kiosk launchers
+test/           node --test suites (npm test; set TEST_DATABASE_URL to include PostgreSQL)
 ```
 
 ## Compared with Skylight
@@ -227,7 +256,7 @@ Hearth covers the calendar, chore chart, rewards, lists, meal plan and a Today d
 
 - Two-way sync, meaning events created on the tablet don't go back to Google or Outlook. That needs an OAuth app registration with each provider.
 - A photo-frame screensaver.
-- A separate phone app. Instead, open the same address on your phone and add it to the home screen.
+- A separate phone app. Instead, open the same address on your phone and add it to the home screen. In the cloud, that works away from home too.
 
 ## License
 

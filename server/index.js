@@ -2,29 +2,21 @@ import './preflight.js';
 import http from 'node:http';
 import https from 'node:https';
 import path from 'node:path';
-import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 import express from 'express';
 import QRCode from 'qrcode';
-import { config } from './config.js';
-import { Store } from './store.js';
-import { CalendarSync } from './calendar.js';
-import { createApi } from './api.js';
-import { sseHandler } from './bus.js';
+import { buildHearth } from './hearth.js';
 import { ensureCertificates } from './certs.js';
 import { lanAddresses, hostnames, mdnsName } from './network.js';
 
-const require = createRequire(import.meta.url);
-const store = new Store(config.dataDir);
-const sync = new CalendarSync(store, config.dataDir);
+// Hearth as a long-running Node.js server: on a computer at home, in Docker,
+// or on a cloud host that runs containers (Render, Fly.io, Railway...).
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const dataDir = path.resolve(process.env.DATA_DIR || path.join(root, 'data'));
+const publicDir = path.join(root, 'public');
 
 let tls = null;
-if (config.httpsEnabled) {
-  try {
-    tls = ensureCertificates(config.dataDir, [...hostnames(), '127.0.0.1', ...lanAddresses(), ...config.publicHosts]);
-  } catch (err) {
-    console.warn(`[https] Could not create certificates, continuing with HTTP only: ${err.message}`);
-  }
-}
 
 function connectionInfo() {
   const hosts = [...new Set([...config.publicHosts, ...lanAddresses()])];
@@ -38,7 +30,6 @@ function connectionInfo() {
   const mdns = mdnsName();
   if (mdns && !hosts.includes(mdns)) urls.push(entry(mdns, 'By name (keeps working if the IP changes)'));
   return {
-    version: config.version,
     hostname: hostnames()[1] || 'localhost',
     urls,
     https: tls ? { port: config.httpsPort, caPath: '/hearth-ca.crt' } : null,
@@ -46,43 +37,44 @@ function connectionInfo() {
 }
 
 const app = express();
-app.disable('x-powered-by');
-app.set('etag', 'strong');
-app.use(express.json({ limit: '256kb' }));
+const hearth = buildHearth(app, {
+  env: process.env,
+  platform: 'node',
+  dataDir,
+  // In the cloud the screen already knows the address: it's the one it's on.
+  system: () => (config.mode === 'home' ? connectionInfo() : {}),
+  mount(app) {
+    // The local certificate authority, for installing on tablets and phones.
+    app.get(['/hearth-ca.crt', '/hearth-ca.pem'], (req, res) => {
+      if (!tls) return res.status(404).send('HTTPS is turned off on this server.');
+      res.set('Content-Type', req.path.endsWith('.pem') ? 'application/x-pem-file' : 'application/x-x509-ca-cert');
+      res.set('Content-Disposition', `attachment; filename="${path.basename(req.path)}"`);
+      res.send(tls.caCert);
+    });
 
-app.get('/api/stream', sseHandler);
-app.use('/api', createApi({ store, sync, system: connectionInfo }));
-
-// The local certificate authority, for installing on tablets and phones.
-app.get(['/hearth-ca.crt', '/hearth-ca.pem'], (req, res) => {
-  if (!tls) return res.status(404).send('HTTPS is turned off on this server.');
-  res.set('Content-Type', req.path.endsWith('.pem') ? 'application/x-pem-file' : 'application/x-x509-ca-cert');
-  res.set('Content-Disposition', `attachment; filename="${path.basename(req.path)}"`);
-  res.send(tls.caCert);
+    app.use(
+      express.static(publicDir, {
+        index: 'index.html',
+        setHeaders(res, file) {
+          // Always revalidate so tablets pick up updates; the service worker
+          // keeps a copy for when the server is unreachable.
+          res.set('Cache-Control', 'no-cache');
+          if (file.endsWith('.webmanifest')) res.type('application/manifest+json');
+          if (file.endsWith(`${path.sep}sw.js`)) res.set('Service-Worker-Allowed', '/');
+        },
+      }),
+    );
+  },
 });
+const { config } = hearth;
 
-// Preact + htm in a single ES module, served straight from node_modules so
-// there is no build step.
-const vendorFile = path.join(path.dirname(require.resolve('htm')), '..', 'preact', 'standalone.module.js');
-app.get('/vendor/preact-htm.js', (req, res) => {
-  res.set('Cache-Control', 'no-cache');
-  res.type('application/javascript').sendFile(vendorFile);
-});
-
-app.use(
-  express.static(config.publicDir, {
-    index: 'index.html',
-    setHeaders(res, file) {
-      // Always revalidate so tablets pick up updates; the service worker
-      // keeps a copy for when the server is unreachable.
-      res.set('Cache-Control', 'no-cache');
-      if (file.endsWith('.webmanifest')) res.type('application/manifest+json');
-      if (file.endsWith(`${path.sep}sw.js`)) res.set('Service-Worker-Allowed', '/');
-    },
-  }),
-);
-
-app.use((req, res) => res.status(404).send('Not found'));
+if (config.httpsEnabled) {
+  try {
+    tls = ensureCertificates(dataDir, [...hostnames(), '127.0.0.1', ...lanAddresses(), ...config.publicHosts]);
+  } catch (err) {
+    console.warn(`[https] Could not create certificates, continuing with HTTP only: ${err.message}`);
+  }
+}
 
 // ---- start ----------------------------------------------------------------
 
@@ -131,8 +123,43 @@ async function main() {
     }
   }
 
-  sync.start();
+  hearth.sync?.start();
 
+  if (config.mode === 'cloud') printCloudStatus();
+  else await printHomeStatus();
+
+  const shutdown = async () => {
+    console.log('\n  Stopping Hearth...');
+    httpServer.close();
+    httpsServer?.close();
+    await hearth.storage?.close?.().catch(() => {});
+    process.exit(0);
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+  process.on('SIGHUP', shutdown);
+}
+
+function printProblems() {
+  if (!hearth.problems.length) return;
+  console.log('  Hearth isn’t ready yet:');
+  for (const p of hearth.problems) console.log(`    • ${p.message}`);
+  console.log('');
+}
+
+function printCloudStatus() {
+  const { storage, live } = hearth;
+  console.log([
+    '',
+    `  Hearth ${config.version} is running in cloud mode on port ${config.port}`,
+    `  Storage:   ${storage ? storage.label : 'not set up'}${storage?.name === 'file' ? ` (${dataDir})` : ''}`,
+    `  Screens:   sign in with HEARTH_PASSWORD; ${live === 'sse' ? 'changes show up live' : `they check for changes every ${config.pollSeconds} s`}`,
+    '',
+  ].join('\n'));
+  printProblems();
+}
+
+async function printHomeStatus() {
   const info = connectionInfo();
   const best = info.urls[0];
   const lines = [
@@ -145,8 +172,12 @@ async function main() {
     lines.push(`  On your network:    ${u.http}${u.https ? `   (secure: ${u.https})` : ''}`);
   }
   if (!info.urls.length) lines.push('  No network connection found. Only this computer can open Hearth.');
-  lines.push(`  Data folder:        ${config.dataDir}`, '');
+  if (hearth.storage?.name === 'file') lines.push(`  Data folder:        ${dataDir}`);
+  else if (hearth.storage) lines.push(`  Storage:            ${hearth.storage.label}`);
+  if (hearth.loginRequired) lines.push('  Sign-in:            each screen signs in with HEARTH_PASSWORD');
+  lines.push('');
   console.log(lines.join('\n'));
+  printProblems();
   // The QR code only helps someone looking at a terminal, not a service log.
   if (best && process.stdout.isTTY) {
     const qr = await QRCode.toString(best.http, { type: 'terminal', small: true });
@@ -161,16 +192,6 @@ async function main() {
     console.log(`  Other devices can't connect? ${firewallHint[process.platform] || firewallHint.linux}\n`);
     console.log('  Press Ctrl+C to stop.\n');
   }
-
-  const shutdown = () => {
-    console.log('\n  Stopping Hearth...');
-    httpServer.close();
-    httpsServer?.close();
-    process.exit(0);
-  };
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
-  process.on('SIGHUP', shutdown);
 }
 
 main().catch((err) => {

@@ -1,7 +1,8 @@
 import { html, render, useEffect, useState } from '/vendor/preact-htm.js';
-import { app, useApp, useNow, api, refreshState, refreshWeather, connectLive } from './lib/store.js';
+import { useApp, useNow, api, start, needsStart, refreshState, refreshWeather } from './lib/store.js';
 import { Icon, navigate } from './lib/ui.js';
 import { PinPad } from './components/pinpad.js';
+import { LoginScreen, SetupScreen } from './components/login.js';
 import { TodayView } from './views/today.js';
 import { CalendarView } from './views/calendar.js';
 import { ChoresView } from './views/chores.js';
@@ -149,6 +150,8 @@ function App() {
     setResetKey((k) => k + 1);
   });
 
+  if (state.problems) return html`<${SetupScreen} problems=${state.problems} />`;
+  if (state.needsLogin) return html`<${LoginScreen} />`;
   if (!state.state) {
     return html`<div class="boot">
       <img src="/icons/icon.svg" alt="" width="88" height="88" />
@@ -171,15 +174,14 @@ function App() {
 
 render(html`<${App} />`, document.getElementById('app'));
 
-refreshState();
-refreshWeather();
-connectLive();
+start();
+// Until the server has answered once (or while it waits to be set up), keep trying.
+setInterval(() => needsStart() && start(), 4000);
 window.addEventListener('online', () => {
+  if (needsStart()) return start();
   refreshState();
   refreshWeather();
 });
-// Before the household data has loaded once, keep retrying.
-const retry = setInterval(() => (app.state ? clearInterval(retry) : refreshState()), 4000);
 
 if ('serviceWorker' in navigator && window.isSecureContext) {
   navigator.serviceWorker.register('/sw.js').catch(() => {});

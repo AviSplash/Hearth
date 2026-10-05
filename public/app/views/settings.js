@@ -1,5 +1,5 @@
 import { html, useState, useEffect, useRef } from '/vendor/preact-htm.js';
-import { useApp, api, attempt, toast, refreshState, refreshWeather, rememberPin, forgetPin } from '../lib/store.js';
+import { useApp, api, attempt, toast, refreshState, refreshWeather, rememberPin, forgetPin, requestPin, logout } from '../lib/store.js';
 import { Icon, Avatar, Modal, Segmented, ColorPicker, EmojiPicker, Toggle, Empty, colorVars, navigate, PALETTE } from '../lib/ui.js';
 import { PinPad } from '../components/pinpad.js';
 
@@ -312,13 +312,72 @@ function Weather({ settings }) {
 
 // ---- devices ---------------------------------------------------------------------
 
-function Devices() {
+function Devices({ settings }) {
   const [info, setInfo] = useState(null);
-  const [os, setOs] = useState(null);
   useEffect(() => {
     api('/system').then(setInfo).catch(() => setInfo({ urls: [] }));
   }, []);
   if (!info) return html`<div class="settings-section"><p class="muted">Loading…</p></div>`;
+  return info.mode === 'cloud'
+    ? html`<${CloudDevices} info=${info} settings=${settings} />`
+    : html`<${HomeDevices} info=${info} settings=${settings} />`;
+}
+
+/** Signing this screen out needs the parent PIN, so kids can't lock the wall tablet out. */
+function SignOut({ settings }) {
+  const { server } = useApp();
+  if (!server?.loginRequired) return null;
+  const signOut = async () => {
+    if (settings.hasPin && !(await requestPin('Enter the parent PIN to sign this screen out'))) return;
+    if (confirm('Sign this screen out? You’ll need the household password to sign in again.')) logout();
+  };
+  return html`<h3 class="subhead">This screen</h3>
+    <p class="muted">Signed in with the household password. To sign every screen out at once (say a tablet went missing), change HEARTH_PASSWORD where Hearth is hosted.</p>
+    <button class="btn ghost danger" onClick=${signOut}><${Icon} name="lock" size=${20} /> Sign out this screen</button>`;
+}
+
+const INSTALL_STEPS = {
+  android: ['Open the address in Chrome and sign in.', 'Tap ⋮ → Add to Home screen → Install.'],
+  ipad: [
+    'Open the address in Safari → Share → Add to Home Screen.',
+    'Open Hearth from the Home Screen and sign in there. (Home Screen apps keep their own sign-in, separate from Safari.)',
+  ],
+  windows: ['Open the address in Edge or Chrome, sign in, and click the install icon in the address bar (or ⋯ → Apps → Install).'],
+  mac: ['In Safari: File → Add to Dock (macOS Sonoma or newer), then sign in inside the new app. In Chrome or Edge: use the install icon in the address bar.'],
+  linux: ['Open the address in Chrome, Chromium or Edge, sign in, and use the install icon in the address bar.'],
+  fire: ['Open the address in Silk, sign in, then use the menu → Add to Home.'],
+};
+
+function CloudDevices({ info, settings }) {
+  const [os, setOs] = useState(null);
+  const address = location.origin;
+  return html`<div class="settings-section">
+    <p>Open Hearth on any tablet, phone or computer by going to this address or scanning the code. It works anywhere with internet, not just at home.</p>
+    <div class="connect-grid">
+      <div class="connect-card">
+        <img class="qr" src=${`/api/qr.svg?text=${encodeURIComponent(address)}`} alt="QR code" width="160" height="160" />
+        <div>
+          <div class="connect-label">Your Hearth address</div>
+          <div class="addr"><code class="wrap">${address}</code></div>
+        </div>
+      </div>
+    </div>
+    <p class="muted">Each new screen asks for the household password once, then stays signed in.</p>
+
+    <h3 class="subhead">Install it as an app</h3>
+    <p class="muted">Hearth is served over https, so any browser can install it full screen. No certificate needed.</p>
+    <div class="os-tabs">
+      <${Segmented} value=${os} onChange=${setOs} small
+        options=${[['android', 'Android'], ['ipad', 'iPad / iPhone'], ['windows', 'Windows'], ['mac', 'Mac'], ['linux', 'Linux'], ['fire', 'Fire tablet']]} />
+      ${os && html`<ol class="steps">${INSTALL_STEPS[os].map((s) => html`<li>${s}</li>`)}</ol>`}
+    </div>
+    <${SignOut} settings=${settings} />
+    <p class="muted small">Hearth ${info.version} · ${info.live === 'sse' ? 'changes show up live' : 'screens check for changes every few seconds'}.</p>
+  </div>`;
+}
+
+function HomeDevices({ info, settings }) {
+  const [os, setOs] = useState(null);
   const secure = window.isSecureContext;
   const primary = info.urls[0];
   const caUrl = info.https ? `${location.protocol}//${location.host}${info.https.caPath}` : null;
@@ -386,8 +445,9 @@ function Devices() {
     </div>
     <p class="muted small">On the computer running Hearth itself, http://localhost:${location.port || '3000'} already counts as secure, so you can install it there without a certificate.
       On Android you can also skip the certificate: open chrome://flags, enable “Insecure origins treated as secure”, and add ${primary?.http || 'the http:// address'}.</p>
+    <${SignOut} settings=${settings} />
     <p class="muted small">Tip: give this computer a fixed IP (a DHCP reservation in your router) so the address never changes${hasName ? ', or use the “by name” address' : ''}.
-      Hearth ${info.version} · ${info.devicesConnected} screen${info.devicesConnected === 1 ? '' : 's'} connected.</p>
+      Hearth ${info.version}${info.devicesConnected != null ? ` · ${info.devicesConnected} screen${info.devicesConnected === 1 ? '' : 's'} connected` : ''}.</p>
   </div>`;
 }
 
@@ -448,7 +508,7 @@ export function SettingsView({ sub }) {
         ${section === 'family' && html`<${Family} state=${state} />`}
         ${section === 'calendars' && html`<${Calendars} state=${state} />`}
         ${section === 'weather' && html`<${Weather} settings=${state.settings} />`}
-        ${section === 'devices' && html`<${Devices} />`}
+        ${section === 'devices' && html`<${Devices} settings=${state.settings} />`}
         ${section === 'security' && html`<${Security} settings=${state.settings} />`}
       </section>
     </div>
